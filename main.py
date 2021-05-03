@@ -1,101 +1,61 @@
 import os
 from datetime import datetime
 import json
+from argparse import ArgumentParser
 
 import torchvision.datasets as D
 import torchvision.transforms as T
 import torch.utils.data as data
 import torch
-from tqdm import tqdm
 from torchvision.utils import save_image
 
 
 from AAE.models import AAE
+from AAE.train import trainAAE
 
 
-class Metric:
-
-    def __init__(self):
-        self._total = {}
-        self._count = 0
-
-    def add(self, losses, bs):
-        self._count += bs
-        for k, v in losses.items():
-            self._total[k] = self._total.get(k, 0.) + v.item() * bs
-
-    def value(self):
-        if hasattr(self, "_values"):
-            return self._values
-        self._values = {k: v / self._count for k, v in self._total.items()}
-        return self._values
-
-
-def train(net, tr_loader, epoch, lrs, device):
-    device = torch.device(device)
-    net.to(device)
-    optimizers = net.optimizers(lrs)
-
-    hist = {}
-    for e in tqdm(range(epoch), "Epoch: "):
-        metric_cache = Metric()
-        net.train()
-        for x, y in tqdm(tr_loader, "Train: ", leave=False):
-            x = x.to(device)
-            losses = {}
-            with torch.enable_grad():
-                for phase in ["rec", "adv1", "adv2"]:
-                    optimizers[phase].zero_grad()
-                    loss = net(x, phase)
-                    loss.backward()
-                    optimizers[phase].step()
-                    losses[phase] = loss
-            metric_cache.add(losses, x.size(0))
-        metric_values = metric_cache.value()
-        for k, v in metric_values.items():
-            hist.setdefault(k, []).append(v)
-
-        tqdm.write(
-            "Train Epoch: %d, " % e + ", ".join([
-                "%s: %.4f" % (k, v) for k, v in metric_values.items()
-            ])
-        )
-
-
-def main():
-    # configuration
-    epoch = 50
-    bs = 256
-    nw = 4
-    lrs = {"rec": 0.0005, "adv1": 0.0005, "adv2": 0.0005}
-    device = "cuda:0"
-
-    code_dim = 100
-    enc_hiddens = [1000, 500]
-    dec_hiddens = [500, 1000]
-    disc_hiddens = [1000, 500]
-    act = 'lrelu'
-    bn = False
-    dropout = 0.7
-
+def load_mnist(conf, test=False):
     # dataset
     transfers = T.Compose([
         T.ToTensor(),
         T.Normalize(0.5, 0.5)
     ])
-    dat = D.MNIST("~/Datasets/", train=True,
+    dat = D.MNIST(conf.data_path, train=True,
                   download=True, transform=transfers)
     loader = data.DataLoader(
-        dat, batch_size=bs, shuffle=True, pin_memory=True, num_workers=nw)
+        dat, batch_size=conf.bs, shuffle=True,
+        pin_memory=True, num_workers=conf.nw
+    )
+
+    if test:
+        te_dat = D.MNIST(
+            conf.data_path, train=False,
+            download=True, transform=transfers
+        )
+        te_loader = data.DataLoader(
+            te_dat, batch_size=conf.bs, shuffle=False,
+            pin_memory=True, num_workers=conf.nw
+        )
+        return loader, te_loader
+    return loader
+
+
+def task_normal(conf):
+    if isinstance(conf.lrs, float):
+        conf.lrs = {k: conf.lrs for k in ["rec", "adv1", "adv2"]}
+
+    # dataset
+    loader = load_mnist(conf)
 
     # model
     net = AAE(
-        (1, 28, 28), code_dim, enc_hiddens, dec_hiddens, disc_hiddens,
-        act, bn, dropout
+        (1, 28, 28), conf.code_dim,
+        conf.enc_hs, conf.dec_hs, conf.disc_hs,
+        conf.act, conf.bn, conf.dropout
     )
 
     # train
-    hist = train(net, loader, epoch, lrs, device)
+    hist = trainAAE(net, loader, conf.epoch, conf.lrs, conf.device)
 
     # generator
     net.eval()
@@ -103,7 +63,7 @@ def main():
 
     # save
     save_path = os.path.join("./results",
-                             datetime.now().strftime("%m-%d-%H-%M"))
+                             datetime.now().strftime("normal_%m-%d-%H-%M"))
     print("savint to %s ..." % save_path)
     os.makedirs(save_path, exist_ok=True)
     with open(os.path.join(save_path, "hist.json"), "w") as f:
@@ -113,6 +73,38 @@ def main():
         samples, os.path.join(save_path, "sample.png"),
         nrow=8, normalize=True, value_range=(-1, 1)
     )
+
+
+def dict_parse(s, vtype=float):
+    res = {}
+    for kv in s.split(","):
+        k, v = kv.split("=")
+        res[k] = vtype(v)
+    return res
+
+
+def main():
+
+    # configuration
+    parser = ArgumentParser()
+    parser.add_argument("--task", default="normal")
+    parser.add_argument("--epoch", default=50, type=int)
+    parser.add_argument("--bs", default=256, type=int)
+    parser.add_argument("--nw", default=4, type=int)
+    parser.add_argument("--lrs", default=0.0005, type=float)
+    parser.add_argument("--device", default="cuda:0")
+    parser.add_argument("--code_dim", default=100, type=int)
+    parser.add_argument("--enc_hs", default=[1000, 500], type=int, nargs="*")
+    parser.add_argument("--dec_hs", default=[500, 1000], type=int, nargs="*")
+    parser.add_argument("--disc_hs", default=[1000, 500], type=int, nargs="*")
+    parser.add_argument("--act", default="lrelu", choices=["relu", "lrelu"])
+    parser.add_argument("--bn", action="store_true")
+    parser.add_argument("--dropout", default=0.7, type=float)
+    parser.add_argument("--data_path", default="~/Datasets/")
+    args = parser.parse_args()
+
+    if args.task == "normal":
+        task_normal(args)
 
 
 if __name__ == "__main__":
