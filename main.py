@@ -10,8 +10,8 @@ import torch
 from torchvision.utils import save_image
 
 
-from AAE.models import AAE
-from AAE.train import trainAAE
+from AAE.models import AAE, SuperviseAAE
+from AAE.train import trainAAE, trainSuperviseAAE
 
 
 def load_mnist(conf, test=False):
@@ -73,6 +73,46 @@ def task_normal(conf):
         samples, os.path.join(save_path, "sample.png"),
         nrow=8, normalize=True, value_range=(-1, 1)
     )
+    with open(os.path.join(save_path, "conf.json"), "w") as f:
+        json.dump(conf.__dict__, f)
+
+
+def task_supervise(conf):
+    if isinstance(conf.lrs, float):
+        conf.lrs = {k: conf.lrs for k in ["rec", "adv1", "adv2"]}
+
+    # dataset
+    loader = load_mnist(conf)
+
+    # model
+    net = SuperviseAAE(
+        (1, 28, 28), 10, conf.code_dim,
+        conf.enc_hs, conf.dec_hs, conf.disc_hs,
+        conf.act, conf.bn, conf.dropout
+    )
+
+    # train
+    hist = trainSuperviseAAE(net, loader, conf.epoch, conf.lrs, conf.device)
+
+    # generator
+    net.eval()
+    y = torch.arange(10).repeat_interleave(8)
+    samples = net(y, phase="sample")
+
+    # save
+    save_path = os.path.join("./results",
+                             datetime.now().strftime("supervise_%m-%d-%H-%M"))
+    print("savint to %s ..." % save_path)
+    os.makedirs(save_path, exist_ok=True)
+    with open(os.path.join(save_path, "hist.json"), "w") as f:
+        json.dump(hist, f)
+    torch.save(net.state_dict(), os.path.join(save_path, "model.pth"))
+    save_image(
+        samples, os.path.join(save_path, "sample.png"),
+        nrow=8, normalize=True, value_range=(-1, 1)
+    )
+    with open(os.path.join(save_path, "conf.json"), "w") as f:
+        json.dump(conf.__dict__, f)
 
 
 def dict_parse(s, vtype=float):
@@ -105,6 +145,8 @@ def main():
 
     if args.task == "normal":
         task_normal(args)
+    elif args.task == "supervise":
+        task_supervise(args)
 
 
 if __name__ == "__main__":
