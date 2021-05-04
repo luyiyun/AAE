@@ -14,3 +14,19 @@ class Metric:
             return self._values
         self._values = {k: v / self._count for k, v in self._total.items()}
         return self._values
+
+
+class Accuracy:
+
+    def __init__(self):
+        self._correct = 0
+        self._count = 0
+
+    def add(self, pred, target):
+        pred = pred.argmax(dim=1)
+        correct = (target == pred).sum().item()
+        self._correct += correct
+        self._count += pred.size(0)
+
+    def value(self):
+        return self._correct / self._count
