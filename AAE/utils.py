@@ -1,4 +1,20 @@
+import torch
+from sklearn.metrics import adjusted_rand_score
+
+
+def set_dict_attr(obj, value, attrname, phases, type):
+    if isinstance(value, dict):
+        setattr(obj, attrname, value)
+    elif isinstance(value, type):
+        newvalue = {k: value for k in phases}
+        setattr(obj, attrname, newvalue)
+    else:
+        raise ValueError
+
+
 class Metric:
+
+    """ losses """
 
     def __init__(self):
         self._total = {}
@@ -30,3 +46,22 @@ class Accuracy:
 
     def value(self):
         return self._correct / self._count
+
+
+class AdjRand:
+
+    def __init__(self):
+        self._preds = []
+        self._targets = []
+
+    def add(self, pred, target):
+        self._preds.append(pred.argmax(dim=1))
+        self._targets.append(target)
+
+    def value(self):
+        if hasattr(self, "_value"):
+            return self._value
+        preds = torch.cat(self._preds).detach().cpu().numpy()
+        targets = torch.cat(self._targets).detach().cpu().numpy()
+        self._value = adjusted_rand_score(targets, preds)
+        return self._value

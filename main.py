@@ -2,7 +2,7 @@ import os
 from datetime import datetime
 import json
 from argparse import ArgumentParser
-from math import ceil
+from functools import partial
 
 import torchvision.datasets as D
 import torchvision.transforms as T
@@ -10,17 +10,14 @@ import torch.utils.data as data
 import torch
 from torchvision.utils import save_image
 import numpy as np
+import matplotlib.pyplot as plt
 
 
-from AAE.models import (
+from AAE import (
     AAE,
     SuperviseAAE,
-    SemiSuperviseAAE
-)
-from AAE.train import (
-    trainAAE,
-    trainSuperviseAAE,
-    trainSemiSuperviseAAE
+    SemiSuperviseAAE,
+    UnSuperviseAAE
 )
 
 
@@ -58,16 +55,12 @@ def load_mnist(conf, test=False, semi=None):
         )
         res.append(te_loader)
 
-
     return tuple(res)
 
 
 def task_normal(conf):
-    if isinstance(conf.lrs, float):
-        conf.lrs = {k: conf.lrs for k in ["rec", "adv1", "adv2"]}
-
     # dataset
-    loader = load_mnist(conf)
+    loader, = load_mnist(conf)
 
     # model
     net = AAE(
@@ -77,7 +70,7 @@ def task_normal(conf):
     )
 
     # train
-    hist = trainAAE(net, loader, conf.epoch, conf.lrs, conf.device)
+    hist = AAE.fit(net, loader, conf.epoch, conf.lr, conf.beta1, conf.device)
 
     # generator
     net.eval()
@@ -100,11 +93,8 @@ def task_normal(conf):
 
 
 def task_supervise(conf):
-    if isinstance(conf.lrs, float):
-        conf.lrs = {k: conf.lrs for k in ["rec", "adv1", "adv2"]}
-
     # dataset
-    loader = load_mnist(conf)
+    loader, = load_mnist(conf)
 
     # model
     net = SuperviseAAE(
@@ -114,7 +104,8 @@ def task_supervise(conf):
     )
 
     # train
-    hist = trainSuperviseAAE(net, loader, conf.epoch, conf.lrs, conf.device)
+    hist = SuperviseAAE.fit(net, loader, conf.epoch, conf.lr, conf.beta1,
+                            conf.device)
 
     # generator
     net.eval()
@@ -137,12 +128,7 @@ def task_supervise(conf):
         json.dump(conf.__dict__, f)
 
 
-def task_semisupervised(conf):
-    phases = ["rec", "adv1", "adv2", "cat_adv1", "cat_adv2", "semi"]
-
-    if isinstance(conf.lrs, float):
-        conf.lrs = {k: conf.lrs for k in phases}
-
+def task_semisupervise(conf):
     # dataset
     tr_loader, sm_loader, te_loader = load_mnist(
         conf, test=True, semi=conf.Nlabel
@@ -151,18 +137,22 @@ def task_semisupervised(conf):
     # model
     net = SemiSuperviseAAE(
         (1, 28, 28), 10, conf.code_dim,
-        conf.enc_hs, conf.dec_hs, conf.disc_hs, conf.cat_disc_hs,
+        conf.enc_hs, conf.dec_hs, conf.disc_hs, conf.cdisc_hs,
         conf.act, conf.bn, conf.dropout, conf.tau
     )
 
     # train
-    hist = trainSemiSuperviseAAE(net, tr_loader, sm_loader, conf.epoch,
-                                 conf.lrs, conf.device, te_loader)
+    hist = SemiSuperviseAAE.fit(net, tr_loader, sm_loader, conf.epoch,
+                                conf.lr, conf.beta1, conf.device, te_loader)
 
     # generator
     net.eval()
     y = torch.arange(10).repeat_interleave(8)
     samples = net(y, phase="sample")
+
+    # plot
+    plt.plot(hist["acc"])
+    plt.title("Validation Accuracy")
 
     # save
     save_path = os.path.join(
@@ -180,16 +170,69 @@ def task_semisupervised(conf):
     )
     with open(os.path.join(save_path, "conf.json"), "w") as f:
         json.dump(conf.__dict__, f)
+    plt.savefig(os.path.join(save_path, "acc.png"))
+
+
+def task_unsupervise(conf):
+    # dataset
+    tr_loader, te_loader = load_mnist(conf, test=True)
+
+    # model
+    net = UnSuperviseAAE(
+        (1, 28, 28), conf.Ncluster, conf.code_dim,
+        conf.enc_hs, conf.dec_hs, conf.disc_hs, conf.cdisc_hs,
+        conf.act, conf.bn, conf.dropout, conf.tau
+    )
+
+    # train
+    hist = UnSuperviseAAE.fit(net, tr_loader, conf.epoch, conf.lr, conf.beta1,
+                              conf.device, te_loader)
+
+    # generator
+    net.eval()
+    y = torch.arange(conf.Ncluster).repeat_interleave(10)
+    samples = net(y, phase="sample")
+
+    # plot
+    plt.plot(hist["rand"])
+    plt.title("Validation Adjusted Rand Score")
+
+    # save
+    save_path = os.path.join(
+        "./results",
+        datetime.now().strftime("unsupervise_%m-%d-%H-%M")
+    )
+    print("savint to %s ..." % save_path)
+    os.makedirs(save_path, exist_ok=True)
+    with open(os.path.join(save_path, "hist.json"), "w") as f:
+        json.dump(hist, f)
+    torch.save(net.state_dict(), os.path.join(save_path, "model.pth"))
+    save_image(
+        samples, os.path.join(save_path, "sample.png"),
+        nrow=10, normalize=True, value_range=(-1, 1)
+    )
+    with open(os.path.join(save_path, "conf.json"), "w") as f:
+        json.dump(conf.__dict__, f)
+    plt.savefig(os.path.join(save_path, "rand.png"))
 
 
 def dict_parse(s, vtype=float):
     if ("," not in s) and ("=" not in s):
-        return float(s)
+        return vtype(s)
     res = {}
     for kv in s.split(","):
         k, v = kv.split("=")
         res[k] = vtype(v)
     return res
+
+
+def fixed_bool(s):
+    if s == "true":
+        return True
+    elif s == "false":
+        return False
+    else:
+        raise ValueError
 
 
 def main():
@@ -200,20 +243,31 @@ def main():
     parser.add_argument("--epoch", default=50, type=int)
     parser.add_argument("--bs", default=256, type=int)
     parser.add_argument("--nw", default=4, type=int)
-    parser.add_argument("--lrs", default=0.0005, type=dict_parse)
     parser.add_argument("--device", default="cuda:0")
     parser.add_argument("--code_dim", default=100, type=int)
     parser.add_argument("--enc_hs", default=[1000, 500], type=int, nargs="*")
     parser.add_argument("--dec_hs", default=[500, 1000], type=int, nargs="*")
     parser.add_argument("--disc_hs", default=[1000, 500], type=int, nargs="*")
-    parser.add_argument("--act", default="lrelu", choices=["relu", "lrelu"])
-    parser.add_argument("--bn", action="store_true")
-    parser.add_argument("--dropout", default=0.7, type=dict_parse)
     parser.add_argument("--data_path", default="~/Datasets/")
+
+    # dict parsed arguments
+    parser.add_argument("--lr", default=0.0005, type=dict_parse)
+    parser.add_argument("--bn", default="false",
+                        type=partial(dict_parse, vtype=fixed_bool))
+    parser.add_argument("--act", default="lrelu",
+                        type=partial(dict_parse, vtype=str))
+    parser.add_argument("--dropout", default=0.7, type=dict_parse)
+    parser.add_argument("--beta1", default=0.9, type=dict_parse)
+
+    # semi-supervised learning
     parser.add_argument("--Nlabel", default=1000, type=int)
-    parser.add_argument("--cat_disc_hs", default=[1000, 500], type=int,
+    parser.add_argument("--cdisc_hs", default=[1000, 500], type=int,
                         nargs="*")
     parser.add_argument("--tau", default=0.01, type=float)
+
+    # unsupervised leanring
+    parser.add_argument("--Ncluster", default=10, type=int)
+
     args = parser.parse_args()
 
     if args.task == "normal":
@@ -221,7 +275,9 @@ def main():
     elif args.task == "supervise":
         task_supervise(args)
     elif args.task == "semisupervise":
-        task_semisupervised(args)
+        task_semisupervise(args)
+    elif args.task == "unsupervise":
+        task_unsupervise(args)
 
 
 if __name__ == "__main__":
