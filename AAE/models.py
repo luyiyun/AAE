@@ -272,7 +272,7 @@ class SemiSuperviseAAE(nn.Module):
                 t = torch.cat([t_fake, t_true])
                 return F.binary_cross_entropy_with_logits(p, t)
             elif phase == "cat_adv2":
-                p_fake = self.disc(hc_sample)
+                p_fake = self.cat_disc(hc_sample)
                 t_fake = torch.ones_like(p_fake)
                 return F.binary_cross_entropy_with_logits(p_fake, t_fake)
             elif phase == "semi":
