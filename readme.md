@@ -2,6 +2,8 @@
 
 对抗自编码器(AAE)的实现，实现细节与原文章略有不同，但基本思想一致。
 
+> 当前仅仅实现了基本功能，但其性能表现都还和原文献有差距，之后还有继续改进的空间...
+
 ## Pure AAE
 
 ```bash
@@ -48,7 +50,7 @@ python main.py  --task semisupervise --code_dim 10
 
 ## Unsupervised AAE
 
-`````bash
+```bash
 python main.py --task unsupervise --bs 2560 --epoch 1000
 ```
 
