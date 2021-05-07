@@ -1,6 +1,6 @@
 from itertools import chain
 from math import prod
-from copy import deepcopy
+# from copy import deepcopy
 
 import torch
 import torch.nn as nn
@@ -9,11 +9,11 @@ import torch.optim as optim
 from tqdm import tqdm
 from torch.distributions import OneHotCategorical
 
-from .utils import Metric, AdjRand, set_dict_attr
+from .utils import Metric, set_dict_attr
 from .base import MLP
 
 
-class UnSuperviseAAE(nn.Module):
+class EmbedSuperviseAAE(nn.Module):
 
     components = ("enc", "dec", "disc", "cdisc")
     phases = ("rec", "adv1", "adv2", "cadv1", "cadv2")
@@ -49,7 +49,7 @@ class UnSuperviseAAE(nn.Module):
             dropout=self._dropout["enc"]
         )
         self.dec = MLP(
-            self._hidden+self._out, self._inc1, self._dec_h,
+            self._hidden, self._inc1, self._dec_h,
             act=self._act["dec"],
             bn=self._bn["dec"],
             dropout=self._dropout["dec"],
@@ -66,6 +66,9 @@ class UnSuperviseAAE(nn.Module):
             act=self._act["cdisc"],
             bn=self._bn["cdisc"],
             dropout=self._dropout["cdisc"],
+        )
+        self.cluster_head = nn.Parameter(
+            torch.randn(self._out, self._hidden) * 0.1
         )
         self.flatten = nn.Flatten()
         self.logsoftmax = nn.LogSoftmax(dim=1)
@@ -87,7 +90,8 @@ class UnSuperviseAAE(nn.Module):
                 loghc = self.logsoftmax(hc)
                 hc_sample = self._gumbel_softmax_sample(loghc)
             if phase == "rec":
-                rec = self.dec(torch.cat([hz, hc_sample], 1))
+                embed = hc_sample.mm(self.cluster_head) + hz
+                rec = self.dec(embed)
                 return F.mse_loss(rec, x)
             elif phase == "adv1":
                 h_true = torch.randn_like(hz)
@@ -123,6 +127,14 @@ class UnSuperviseAAE(nn.Module):
                 hiddens = torch.randn((x.size(0), self._hidden), device=device)
                 x = self.dec(torch.cat([hiddens, labels], 1))
                 return x.reshape(-1, *self._inc)
+            elif phase == "embed":
+                x = self.flatten(x)
+                h = self.enc(x)
+                hz = h[:, :self._hidden]
+                hc = h[:, self._hidden:]
+                hc_sample = hc.argmax(dim=1)
+                embed = self.cluster_head[hc_sample] + hz
+                return embed
             elif phase == "pred":
                 x = self.flatten(x)
                 h = self.enc(x)
@@ -165,18 +177,10 @@ class UnSuperviseAAE(nn.Module):
         return F.softmax((loghc + u) / self._tau, dim=1)
 
     @classmethod
-    def fit(
-        cls, net, tr_loader, epoch, lr, beta1, device,
-        va_loader=None
-    ):
+    def fit(cls, net, tr_loader, epoch, lr, beta1, device):
         device = torch.device(device)
         net.to(device)
         optimizers = net.optimizers(lr, beta1)
-
-        if va_loader is not None:
-            best = {"epoch": -1,
-                    "rand": -1000,
-                    "model": deepcopy(net.state_dict())}
 
         hist = {}
         for e in tqdm(range(epoch), "Epoch: "):
@@ -203,28 +207,22 @@ class UnSuperviseAAE(nn.Module):
                 ])
             )
 
-            # valid
-            if va_loader is not None:
-                rand_cache = AdjRand()
-                net.eval()
-                for x, y in tqdm(va_loader, "Valid: ", leave=False):
-                    x = x.to(device)
-                    y = y.to(device)
-                    with torch.no_grad():
-                        pred = net(x, None, "pred")
-                        rand_cache.add(pred, y)
-                rand = rand_cache.value()
-                hist.setdefault("rand", []).append(rand)
-                tqdm.write("Valid Epoch: %d, Adjusted Rand: %.4f" % (e, rand))
-
-                if best["rand"] < rand:
-                    best["epoch"] = e
-                    best["rand"] = rand
-                    best["model"] = deepcopy(net.state_dict())
-
-        if va_loader is not None:
-            print("The best epoch: %d, best rand: %.4f" %
-                  (best["epoch"], best["rand"]))
-            net.load_state_dict(best["model"])
-
         return hist
+
+    @staticmethod
+    def transform(net, loader, device):
+        device = torch.device(device)
+        net.to(device)
+
+        net.eval()
+        hs, ys = [], []
+        for x, y in tqdm(loader, "Transform: "):
+            ys.append(y)
+            x = x.to(device)
+            with torch.no_grad():
+                h = net(x, None, "embed")
+                hs.append(h)
+
+        hs = torch.cat(hs).detach().cpu().numpy()
+        ys = torch.cat(ys).detach().cpu().numpy()
+        return hs, ys

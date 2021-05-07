@@ -11,13 +11,16 @@ import torch
 from torchvision.utils import save_image
 import numpy as np
 import matplotlib.pyplot as plt
+import pandas as pd
+import seaborn as sns
 
 
 from AAE import (
     AAE,
     SuperviseAAE,
     SemiSuperviseAAE,
-    UnSuperviseAAE
+    UnSuperviseAAE,
+    EmbedSuperviseAAE
 )
 
 
@@ -216,6 +219,44 @@ def task_unsupervise(conf):
     plt.savefig(os.path.join(save_path, "rand.png"))
 
 
+def task_embed(conf):
+    # dataset
+    tr_loader, te_loader = load_mnist(conf, test=True)
+
+    # model
+    net = EmbedSuperviseAAE(
+        (1, 28, 28), conf.Ncluster, conf.code_dim,
+        conf.enc_hs, conf.dec_hs, conf.disc_hs, conf.cdisc_hs,
+        conf.act, conf.bn, conf.dropout, conf.tau
+    )
+
+    # train
+    hist = EmbedSuperviseAAE.fit(net, tr_loader, conf.epoch, conf.lr,
+                                 conf.beta1, conf.device)
+
+    # transform
+    code, y = EmbedSuperviseAAE.transform(net, te_loader, conf.device)
+
+    # plot
+    df = pd.DataFrame({"Z1": code[:, 0], "Z2": code[:, 1], "class": y})
+    df["class"] = df["class"].astype("category")
+    fig = sns.relplot(data=df, x="Z1", y="Z2", hue="class")
+    fig.set_titles("Validation Embed")
+
+    # save
+    save_path = os.path.join(
+        "./results", datetime.now().strftime("embed_%m-%d-%H-%M")
+    )
+    print("savint to %s ..." % save_path)
+    os.makedirs(save_path, exist_ok=True)
+    with open(os.path.join(save_path, "hist.json"), "w") as f:
+        json.dump(hist, f)
+    torch.save(net.state_dict(), os.path.join(save_path, "model.pth"))
+    with open(os.path.join(save_path, "conf.json"), "w") as f:
+        json.dump(conf.__dict__, f)
+    fig.savefig(os.path.join(save_path, "embed.png"))
+
+
 def dict_parse(s, vtype=float):
     if ("," not in s) and ("=" not in s):
         return vtype(s)
@@ -256,14 +297,14 @@ def main():
                         type=partial(dict_parse, vtype=fixed_bool))
     parser.add_argument("--act", default="lrelu",
                         type=partial(dict_parse, vtype=str))
-    parser.add_argument("--dropout", default=0.7, type=dict_parse)
+    parser.add_argument("--dropout", default=0.5, type=dict_parse)
     parser.add_argument("--beta1", default=0.9, type=dict_parse)
 
     # semi-supervised learning
     parser.add_argument("--Nlabel", default=1000, type=int)
     parser.add_argument("--cdisc_hs", default=[1000, 500], type=int,
                         nargs="*")
-    parser.add_argument("--tau", default=0.01, type=float)
+    parser.add_argument("--tau", default=0.05, type=float)
 
     # unsupervised leanring
     parser.add_argument("--Ncluster", default=10, type=int)
@@ -278,6 +319,10 @@ def main():
         task_semisupervise(args)
     elif args.task == "unsupervise":
         task_unsupervise(args)
+    elif args.task == "embed":
+        task_embed(args)
+    else:
+        raise ValueError
 
 
 if __name__ == "__main__":
